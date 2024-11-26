@@ -10,8 +10,8 @@ Our default installation method is based on Conda package and environment manage
 #### Step 1: Clone this repo and install `cuda-toolkit` with `conda`
 
 ```shell
-git clone https://github.com/surfhead2025/SurFhead.git --recursive
-cd SurFhead
+git clone https://github.com/Oliver-Cong02/SurFhead-Hand.git --recursive
+d SurFhead-Hand
 
 conda create --name surfhead -y python=3.10
 conda activate surfhead
