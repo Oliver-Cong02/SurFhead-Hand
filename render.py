@@ -21,19 +21,29 @@ from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
 import numpy as np
+import joblib
 # from utils.general_utils import colormap
 
-from gaussian_renderer import render
+from gaussian_renderer import render, render_contact
 from utils.general_utils import safe_state
+from utils.graphics_utils import focal2fov
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel, FlameGaussianModel
+from gaussian_renderer import GaussianModel, UniGaussians
 from mesh_renderer import NVDiffRenderer
 from utils.mesh_utils import GaussianExtractor, to_cam_open3d, post_process_mesh
 from utils.image_utils import apply_depth_colormap, frames2video
+from utils.brics_utils.vis_util import plot_points_in_image, project, get_colors_from_cmap
+from utils.brics_utils.extra import *
+from utils.brics_utils.cam_utils import get_opengl_camera_attributes
+from scene.dataset_readers import CameraInfo
 from scene import SpecularModel
 #! import F
 import torch.nn.functional as F
+import glob
+
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 import open3d as o3d
 from torchvision.utils import save_image as si
@@ -43,6 +53,57 @@ try:
 except:
     print("Cannot import NVDiffRenderer. Mesh rendering will be disabled.")
     mesh_renderer = None
+
+
+import taichi as ti
+ti.init(arch=ti.cuda, device_memory_fraction=0.8)
+def get_contact_dist(pt1, pt2):
+    device = pt1.device
+
+    ti_pt1 = ti.ndarray(shape=(pt1.shape[0], 3), dtype=ti.f32)
+    ti_pt2 = ti.ndarray(shape=(pt2.shape[0], 3), dtype=ti.f32)
+    ti_contact_map = ti.ndarray(shape=pt1.shape[0], dtype=ti.f32)
+    ti_contact_indices = ti.ndarray(shape=pt1.shape[0], dtype=ti.f32)
+
+    ti_pt1.from_numpy(to_numpy(pt1))
+    ti_pt2.from_numpy(to_numpy(pt2))
+
+    @ti.kernel
+    def calculate_distances(
+        ti_pt1: ti.types.ndarray(ndim=2),
+        ti_pt2: ti.types.ndarray(ndim=2),
+        ti_contact_map: ti.types.ndarray(ndim=1),
+        ti_contact_indices: ti.types.ndarray(ndim=1),
+    ):
+        for i in range(pt1.shape[0]):
+            min_dist = 1e9
+            for j in range(pt2.shape[0]):
+                dist = 0.0
+                for k in range(3):
+                    dist += (ti_pt1[i, k] - ti_pt2[j, k]) ** 2
+                dist = ti.sqrt(dist)
+                if dist < min_dist:
+                    min_dist = dist
+                    ti_contact_indices[i] = j
+            ti_contact_map[i] = min_dist
+
+    calculate_distances(ti_pt1, ti_pt2, ti_contact_map, ti_contact_indices)
+    contact_map = attach(to_tensor(ti_contact_map.to_numpy()), device)
+    contact_indices = attach(to_tensor(ti_contact_indices.to_numpy()), device)
+    return contact_map, contact_indices
+
+def get_colormap(pt1, pt2, c_thresh=0.004, cmap_type="gray"):
+    dist, indices = get_contact_dist(pt1, pt2)
+    dist = torch.clamp(dist.clone(), 0, c_thresh) / c_thresh
+    dist = 1 - dist
+    colors = get_colors_from_cmap(to_numpy(dist), cmap_name=cmap_type)[..., :3]
+    colors = attach(to_tensor(colors), pt1.device)
+    return dist, indices, colors
+def calculate_cmap(obj_xyz, hand_xyz, cmap_type = 'gray'): 
+    dist_h, indices_h, cmap_h = get_colormap(hand_xyz, obj_xyz, c_thresh= 0.004, cmap_type = cmap_type)
+    return dist_h, cmap_h
+
+
 
 from matplotlib.colors import Normalize
 from matplotlib.cm import get_cmap
@@ -165,7 +226,8 @@ def render_set(dataset, name, iteration, views, gaussians, pipeline, background,
     if extract_mesh:
         mesh_path = iter_path / "meshes"
         revolver = 80
-        gaussians.select_mesh_by_timestep(views[revolver*16].timestep)
+        if gaussians.hand_gaussian_model.binding != None:
+            gaussians.hand_gaussian_model.select_mesh_by_timestep(views[0].timestep)
         gaussExtractor = GaussianExtractor(gaussians, render, pipeline, bg_color=background)   
          
     os.makedirs(gts_path, exist_ok=True)
@@ -186,7 +248,13 @@ def render_set(dataset, name, iteration, views, gaussians, pipeline, background,
     print('Max threads: ', max_threads)
     worker_args = []
     ONLY_IMAGE = False
-    
+    view_cam_names = {}
+    # import ipdb; ipdb.set_trace()
+    for idx, view in enumerate(views_loader):
+        if view.image_name not in view_cam_names:
+            view_cam_names[view.image_name] = []
+        view_cam_names[view.image_name].append(view)
+    idx = 0
     # breakpoint()
     if extract_mesh:
         if random_camera != 0:
@@ -237,11 +305,12 @@ def render_set(dataset, name, iteration, views, gaussians, pipeline, background,
         o3d.io.write_triangle_mesh(os.path.join(mesh_path, name.replace('.ply', '_post.ply')), mesh_post)
         print("mesh post processed saved at {}".format(os.path.join(mesh_path, name.replace('.ply', '_post.ply'))))
         exit()
-        if False:
-        # for idx, view in enumerate(views[:16]+views_random):
-            aa = mesh_renderer.render_from_camera(torch.tensor(np.array(mesh_post.vertices),dtype=torch.float32)[None].cuda(),torch.tensor(np.array(mesh_post.triangles),dtype=torch.float32).cuda(),view)['rgba']
-            # if gaussians.binding is not None:
-            #     gaussians.select_mesh_by_timestep(view.timestep)
+
+    # for idx, view in enumerate(tqdm(views_loader, desc="Rendering progress")):
+    for cam_name, cam_views in view_cam_names.items():
+        for view in cam_views:
+            if gaussians.hand_gaussian_model.binding != None:
+                gaussians.hand_gaussian_model.select_mesh_by_timestep(view.timestep)
             
             K = 600_000  # Temporarily fixed
             han_window_iter = iteration * 2 / (K + 1)
@@ -265,19 +334,15 @@ def render_set(dataset, name, iteration, views, gaussians, pipeline, background,
                     
                     normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
                     if pipeline.rotSH:
-                        # breakpoint()
                         dir_pp_normalized = (gaussians.face_R_mat.permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
             
             
                 if pipeline.spec_only_eyeball:
                     # breakpoint()
-                    mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.eyeballs)
+                    mask = torch.isin(gaussians.hand_gaussian_model.binding, gaussians.flame_model.mask.f.eyeballs)
                     points_indices = torch.nonzero(mask).squeeze(1)
                     
                     specular_color_eyeballs = specular.step(gaussians.get_sg_features[points_indices], dir_pp_normalized[points_indices], normal[points_indices].detach(), sg_type = pipeline.sg_type)
-                    
-                
-                    
                     specular_color = specular_color_eyeballs
                 
                 else:
@@ -285,172 +350,106 @@ def render_set(dataset, name, iteration, views, gaussians, pipeline, background,
                 
             else:
                 specular_color = None
-            render_bucket = render(view, gaussians, pipeline, background, 
-                                backface_culling_smooth=dataset.backface_culling_smooth,
-                                backface_culling_hard=dataset.backface_culling_hard,
+            render_bucket = render(view, gaussians, pipeline, background,
                                 iter=han_window_iter,
-                                specular_color= specular_color,
-                                    spec_only_eyeball = pipeline.spec_only_eyeball)
+                                specular_color= specular_color)
+
+            rendering = render_bucket["render"]
             
-            si(render_bucket["render"], os.path.join(mesh_path, name.replace('.ply', f'{idx}_render_image.png')))
-            si(aa[0].permute(2,0,1), os.path.join(mesh_path, name.replace('.ply', f'{idx}_render.png')))
-            # breakpoint()
-        # exit()
-    for idx, view in enumerate(tqdm(views_loader, desc="Rendering progress")):
-        if gaussians.binding is not None:
-            gaussians.select_mesh_by_timestep(view.timestep)
-        
-        K = 600_000  # Temporarily fixed
-        han_window_iter = iteration * 2 / (K + 1)
-        if pipeline.SGs:
-            if pipeline.train_kinematic:
-                dir_pp = (gaussians.get_blended_xyz - view.camera_center.repeat(gaussians.get_features.shape[0], 1).cuda())
-                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                normal = gaussians.get_normal
-                normal_normalised = F.normalize(normal,dim=-1).detach()
+            gt = view.original_image[0:3, :, :]
+
+            if not ONLY_IMAGE:
                 # breakpoint()
+                gt_mask = view.original_mask[0:1, :, :]
+                rendering = rendering * gt_mask.repeat(3,1,1).cuda()
+                gt = gt * gt_mask.repeat(3,1,1)
+                try:
+                    gt_normal = view.original_normal[0:3, :, :]
+                    normal_path = iter_path / 'normal'
+                    os.makedirs(normal_path, exist_ok=True)
+                except:
+                    gt_normal = None
                 
-                normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                if pipeline.rotSH:
-                    dir_pp_normalized = (gaussians.blended_R.permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
+                if render_mesh:
+                    out_dict = mesh_renderer.render_from_camera(gaussians.hand_gaussian_model.verts, gaussians.hand_gaussian_model.faces, view)
+                    rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
+                    rgb_mesh = rgba_mesh[:3, :, :]
+                    alpha_mesh = rgba_mesh[3:, :, :]
+                    mesh_opacity = 0.5
+                    # --- xiaoyan --- #
+                    rendering_mesh = rgb_mesh * alpha_mesh * mesh_opacity + rendering.to(rgb_mesh) * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
+                    # --- xiaoyan --- #
+                    # rendering_mesh = rgb_mesh * alpha_mesh * mesh_opacity + gt.to(rgb_mesh) * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
+            if not ONLY_IMAGE:
+                
+                path2data = {
+                    Path(render_path) / f'{idx:05d}.png': rendering,
+                    # Path(render_path) / f'{view.image_name}.png': rendering,
+                    Path(gts_path) / f'{cam_name}.png': gt,
+                    Path(mask_path) / f'{idx:05d}.png': gt_mask.repeat(3,1,1),
+                    Path(render_alpha_path) / f'{idx:05d}.png': render_bucket['surfel_rend_alpha'].repeat(3,1,1) * gt_mask.repeat(3,1,1).cuda(),
+                    Path(render_analytic_normal_path) / f'{idx:05d}.png': (render_bucket["surfel_surf_normal"] * 0.5 + 0.5)  * gt_mask.repeat(3,1,1).cuda(),
+                    Path(render_analytic_normal_path) / f'{idx:05d}.npy': render_bucket["surfel_surf_normal"].detach().cpu().numpy(),
+                    Path(render_tangent_normal_path) / f'{idx:05d}.png': (render_bucket["surfel_rend_normal"] * 0.5 + 0.5) * gt_mask.repeat(3,1,1).cuda(),
+                    Path(render_tangent_normal_path) / f'{idx:05d}.npy': render_bucket["surfel_rend_normal"].detach().cpu().numpy(),
+                }
             else:
-                dir_pp = (gaussians.get_xyz - view.camera_center.repeat(gaussians.get_features.shape[0], 1).cuda())
-                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                normal = gaussians.get_normal
-                normal_normalised = F.normalize(normal,dim=-1).detach()
+                path2data = {
+                    Path(render_path) / f'{idx:05d}.png': rendering,
+                    Path(gts_path) / f'{idx:05d}.png': gt,
+                    Path(render_tangent_normal_path) / f'{idx:05d}.png': render_bucket["surfel_rend_normal"] * 0.5 + 0.5,
+                }
+            if not ONLY_IMAGE:
+                if gt_normal is not None:
+                    path2data[Path(normal_path) / f'{idx:05d}.png'] = gt_normal
+                    path2data[Path(normal_path) / f'{idx:05d}.npy'] = (gt_normal * 2 - 1).detach().cpu().numpy()
+                
+                depth = render_bucket["surfel_surf_depth"]
+                # depth = depth * gt_mask.cuda()
+                # norm = depth.max()
+                # depth = depth / norm
+                # depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
+                
+                alpha = render_bucket['surfel_rend_alpha']
+                valid_depth_area = depth[gt_mask > 0.1]
+                max_depth_value = valid_depth_area.max()
+                min_depth_value = valid_depth_area.min()
+                
+                norm = max_depth_value - min_depth_value
+                depth[alpha < 0.1] = max_depth_value #! fill bg with max depth
+                depth = (depth - min_depth_value) / norm
+                # from torchvision.utils import save_image as si
                 # breakpoint()
+                # depth = depth / norm
+                depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
+                depth = depth * gt_mask.repeat(3,1,1).cpu()
+                path2data[Path(render_depth_path) / f'{idx:05d}.png'] = depth
                 
-                normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                if pipeline.rotSH:
-                    dir_pp_normalized = (gaussians.face_R_mat.permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
-           
-           
-            if pipeline.spec_only_eyeball:
-                # breakpoint()
-                mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.eyeballs)
-                points_indices = torch.nonzero(mask).squeeze(1)
-                
-                specular_color_eyeballs = specular.step(gaussians.get_sg_features[points_indices], dir_pp_normalized[points_indices], normal[points_indices].detach(), sg_type = pipeline.sg_type)
-                
-              
-                
-                specular_color = specular_color_eyeballs
-               
-            else:
-                specular_color = specular.step(gaussians.get_sg_features, dir_pp_normalized, normal.detach(), sg_type = pipeline.sg_type)
-               
-        else:
-            specular_color = None
-        render_bucket = render(view, gaussians, pipeline, background, 
-                               backface_culling_smooth=dataset.backface_culling_smooth,
-                               backface_culling_hard=dataset.backface_culling_hard,
-                               iter=han_window_iter,
-                               specular_color= specular_color,
-                                spec_only_eyeball = pipeline.spec_only_eyeball)
-        # breakpoint()
-        
-            
-        rendering = render_bucket["render"]
-        
-        gt = view.original_image[0:3, :, :]
-        if not ONLY_IMAGE:
-            gt_mask = view.original_mask[0:1, :, :]
-            try:
-                gt_normal = view.original_normal[0:3, :, :]
-                normal_path = iter_path / 'normal'
-                os.makedirs(normal_path, exist_ok=True)
-            except:
-                gt_normal = None
-            
-            if render_mesh:
-                out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, view)
-                rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
-                rgb_mesh = rgba_mesh[:3, :, :]
-                alpha_mesh = rgba_mesh[3:, :, :]
-                mesh_opacity = 0.5
-                rendering_mesh = rgb_mesh * alpha_mesh * mesh_opacity + gt.to(rgb_mesh) * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
-        if not ONLY_IMAGE:
-            
-            path2data = {
-                Path(render_path) / f'{idx:05d}.png': rendering,
-                Path(gts_path) / f'{idx:05d}.png': gt,
-                Path(mask_path) / f'{idx:05d}.png': gt_mask.repeat(3,1,1),
-                Path(render_alpha_path) / f'{idx:05d}.png': render_bucket['surfel_rend_alpha'].repeat(3,1,1),
-                Path(render_analytic_normal_path) / f'{idx:05d}.png': render_bucket["surfel_surf_normal"] * 0.5 + 0.5,
-                Path(render_analytic_normal_path) / f'{idx:05d}.npy': render_bucket["surfel_surf_normal"].detach().cpu().numpy(),
-                Path(render_tangent_normal_path) / f'{idx:05d}.png': (render_bucket["surfel_rend_normal"] * 0.5 + 0.5) * gt_mask.repeat(3,1,1).cuda() + (1 - gt_mask.repeat(3,1,1).cuda()),
-                Path(render_tangent_normal_path) / f'{idx:05d}.npy': render_bucket["surfel_rend_normal"].detach().cpu().numpy(),
-            }
-        else:
-            path2data = {
-                Path(render_path) / f'{idx:05d}.png': rendering,
-                Path(gts_path) / f'{idx:05d}.png': gt,
-                Path(render_tangent_normal_path) / f'{idx:05d}.png': render_bucket["surfel_rend_normal"] * 0.5 + 0.5,
-            }
-        if not ONLY_IMAGE:
-            if gt_normal is not None:
-                path2data[Path(normal_path) / f'{idx:05d}.png'] = gt_normal
-                path2data[Path(normal_path) / f'{idx:05d}.npy'] = (gt_normal * 2 - 1).detach().cpu().numpy()
-            
-            depth = render_bucket["surfel_surf_depth"]
-            # depth = depth * gt_mask.cuda()
-            # norm = depth.max()
-            # depth = depth / norm
-            # depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
-            
-            alpha = render_bucket['surfel_rend_alpha']
-            valid_depth_area = depth[gt_mask > 0.1]
-            max_depth_value = valid_depth_area.max()
-            min_depth_value = valid_depth_area.min()
-            
-            norm = max_depth_value - min_depth_value
-            depth[alpha < 0.1] = max_depth_value #! fill bg with max depth
-            depth = (depth - min_depth_value) / norm
-            # from torchvision.utils import save_image as si
+                if render_mesh:
+                    path2data[Path(render_mesh_path) / f'{idx:05d}.png'] = rendering_mesh
+
+            worker_args.append(path2data)
             # breakpoint()
-            # depth = depth / norm
-            depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
-            depth = depth * gt_mask.repeat(3,1,1).cpu() + (1 - gt_mask.repeat(3,1,1).cpu())
-            path2data[Path(render_depth_path) / f'{idx:05d}.png'] = depth
-            
-            if render_mesh:
-                path2data[Path(render_mesh_path) / f'{idx:05d}.png'] = rendering_mesh
-
-        worker_args.append(path2data)
-        # breakpoint()
-        if len(worker_args) == max_threads or idx == len(views_loader) - 1:
-            with concurrent.futures.ThreadPoolExecutor(max_threads) as executor:
-                futures = [executor.submit(write_data, args) for args in worker_args]
-                for future in futures:
-                    future.result()
-            worker_args = []
-    
-
-    # frames2video(render_path, f"{iter_path}/renders.mp4")
-    # frames2video(gts_path, f"{iter_path}/gt.mp4")
-    # frames2video(render_tangent_normal_path, f"{iter_path}/renders_normal.mp4")
-
+            if len(worker_args) == max_threads or idx == len(views_loader) - 1:
+                with concurrent.futures.ThreadPoolExecutor(max_threads) as executor:
+                    futures = [executor.submit(write_data, args) for args in worker_args]
+                    for future in futures:
+                        future.result()
+                worker_args = []
+            idx += 1
         
+
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_val : bool, skip_test : bool, \
     render_mesh: bool, extract_mesh: bool, random_camera : int = 0):
     with torch.no_grad():
         if dataset.bind_to_mesh:
-            if os.path.basename(dataset.source_path).startswith("FaceTalk"):
-                # breakpoint()
-                n_shape = 100    
-                n_expr = 50
-            else:
-                n_shape = 300
-                n_expr = 100   
-            # gaussians = FlameGaussianModel(dataset.sh_degree, dataset.disable_flame_static_offset)
-            gaussians = FlameGaussianModel(dataset.sh_degree, dataset.disable_flame_static_offset, dataset.not_finetune_flame_params,\
-                train_normal = False, n_shape=n_shape, n_expr=n_expr, train_kinematic=pipeline.train_kinematic, \
-                DTF = pipeline.DTF, invT_Jacobian=pipeline.invT_Jacobian,
-                detach_eyeball_geometry = pipeline.detach_eyeball_geometry)
+            uni_gaussians = UniGaussians(sh_degree=dataset.sh_degree, obj_mesh_paths=dataset.obj_mesh_paths)
+            # gaussians = MANOGaussianModel(dataset.sh_degree, dataset.not_finetune_MANO_params)
+            mesh_renderer = NVDiffRenderer()
         else:
-            gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+            exit()
+        scene = Scene(dataset, uni_gaussians, load_iteration=iteration, shuffle=False)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -462,19 +461,19 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         if dataset.target_path != "":
              name = os.path.basename(os.path.normpath(dataset.target_path))
              # when loading from a target path, test cameras are merged into the train cameras
-             render_set(dataset, f'{name}', scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
+             render_set(dataset, f'{name}', scene.loaded_iter, scene.getTrainCameras(), uni_gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
         else:
             if not skip_train:
                 # if random_camera !=0:
-                render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
+                render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(), uni_gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
                 # else:
                     # render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh, extract_mesh)
             
             if not skip_val:
-                render_set(dataset, "val", scene.loaded_iter, scene.getValCameras(), gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
+                render_set(dataset, "val", scene.loaded_iter, scene.getValCameras(), uni_gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
 
             if not skip_test:
-                render_set(dataset, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
+                render_set(dataset, "test", scene.loaded_iter, scene.getTestCameras(), uni_gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -498,6 +497,6 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-
+    
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_val, args.skip_test,\
         args.render_mesh, args.extract_mesh, args.random_camera)

@@ -36,6 +36,12 @@ class CameraInfo(NamedTuple):
     mask: Optional[np.array] 
     mask_path: str
     mask_name: str    
+    normal: Optional[np.array]
+    normal_path: str
+    normal_name: str
+    mask_face: Optional[np.array] 
+    mask_face_path: str
+    mask_face_name: str  
     width: int
     height: int
     bg: np.array = np.array([0, 0, 0])
@@ -192,7 +198,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
-
+    # breakpoint()
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         if 'camera_angle_x' in contents:
@@ -210,7 +216,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             c2w = np.array(frame["transform_matrix"])
             # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
             c2w[:3, 1:3] *= -1
-
+            #! c2w = [X, Y, Z, T] XdotY=0, XdotZ=0, YdotZ=0
             # get the world-to-camera transform and set R, T
             w2c = np.linalg.inv(c2w)
             R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
@@ -224,9 +230,15 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             mask_path = image_path.replace(file_path, frame["fg_mask_path"])
             mask_name = Path(mask_path).stem
             
+            
+            mask_face_path = image_path.replace('images', 'binary_facer')
+            # breakpoint()
+            mask_face_name = Path(mask_face_path).stem
+            
             if 'w' in frame and 'h' in frame:
                 image = None
                 mask = None
+                mask_face = None
                 width = frame['w']
                 height = frame['h']
             else:
@@ -247,9 +259,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             camera_id = frame["camera_index"] if 'camera_id' in frame else None
             
             cam_infos.append(CameraInfo(
-                uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, bg=bg, image=image, mask=mask,
+                uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, bg=bg, image=image, mask=mask, normal=None,
                 mask_path=mask_path, mask_name=mask_name,   
+                mask_face=mask_face, mask_face_path=mask_face_path, mask_face_name=mask_face_name,  
                 image_path=image_path, image_name=image_name, 
+                normal_path=None, normal_name=None,
                 width=width, height=height, 
                 timestep=timestep, camera_id=camera_id))
     return cam_infos
@@ -301,8 +315,253 @@ def readMeshesFromTransforms(path, transformsfile):
                 continue
 
             flame_param = dict(np.load(os.path.join(path, frame['flame_param_path']), allow_pickle=True))
+            # breakpoint()
             mesh_infos[frame["timestep_index"]] = flame_param
     return mesh_infos
+
+
+
+def readMeshesFromCorpuses(path, transformsmode):
+    
+    if transformsmode == 'train':
+        corpus_chunk = FaceTalk_train_corpuses
+    elif transformsmode == 'val':
+        corpus_chunk = FaceTalk_val_corpuses    
+    elif transformsmode == 'test':
+        corpus_chunk = FaceTalk_test_corpuses
+    
+    mesh_infos = {}
+    
+    outer_idx = 0
+    #? 'translation', 'rotation', 'neck_pose', 'jaw_pose', 'eyes_pose', 'shape', 'expr', 'static_offset'
+    # for corpus in corpus_chunk:
+    for corpus_idx, corpus in tqdm(enumerate(corpus_chunk), total=len(corpus_chunk)):
+    
+        with open(os.path.join(path, corpus, 'transforms.json')) as json_file:
+            contents = json.load(json_file)
+            
+            frames = contents["frames"]
+            shape_shared = np.array(contents["shape"], dtype=np.float32).squeeze()
+            # for idx, frame in tqdm(enumerate(frames), total=len(frames)):
+            for idx, frame in enumerate(frames):
+                flame_param = dict()
+                # if not 'timestep_index' in frame or frame["timestep_index"] in mesh_infos:
+                #     continue
+                # breakpoint()
+                flame_param['translation'] = np.zeros((1,3), dtype=np.float32)
+                pose_correctives = np.array(frame['pose'], dtype=np.float32)
+                flame_param['rotation'] = pose_correctives[:,:3]
+                flame_param['neck_pose'] = pose_correctives[:,3:6]
+                flame_param['jaw_pose'] = pose_correctives[:,6:9]
+                flame_param['eyes_pose'] = pose_correctives[:,9:] #! 6
+                flame_param['shape'] = shape_shared  #! GA (300,)
+                flame_param['expr'] = np.array(frame['expression'], dtype=np.float32) #! GA (1,100)
+                flame_param['static_offset'] = np.zeros((1,5143,3), dtype=np.float32)
+                # breakpoint()
+                # flame_param = dict(np.load(os.path.join(path, frame['flame_param_path']), allow_pickle=True))
+                mesh_infos[outer_idx] = flame_param
+                outer_idx += 1
+            
+    return mesh_infos
+
+    with open(os.path.join(path, transformsmode)) as json_file:
+        contents = json.load(json_file)
+        frames = contents["frames"]
+        
+        mesh_infos = {}
+        for idx, frame in tqdm(enumerate(frames), total=len(frames)):
+            if not 'timestep_index' in frame or frame["timestep_index"] in mesh_infos:
+                continue
+
+            flame_param = dict(np.load(os.path.join(path, frame['flame_param_path']), allow_pickle=True))
+            mesh_infos[frame["timestep_index"]] = flame_param
+    return mesh_infos
+
+def readCamerasMeshesFromCorpuses(path, transformsmode, white_background, extension=".png", GLOBAL_IDX=0):
+    cam_infos = []
+    mesh_infos = {}
+    # breakpoint()
+    height = width = 512
+    camera_id = 0 #! monocular setting
+    # outer_id = 0
+    
+    if transformsmode == 'train':
+        corpus_chunk = FaceTalk_train_corpuses
+    elif transformsmode == 'val':
+        corpus_chunk = FaceTalk_val_corpuses    
+    elif transformsmode == 'test':
+        corpus_chunk = FaceTalk_test_corpuses
+    if transformsmode == 'val':
+        GLOBAL_IDX = 0 #! pause for each validation division bc same with train division
+    
+    GLOBAL_IDX_from = GLOBAL_IDX
+    
+    # for corpus in corpus_chunk:
+    print(f"Reading {len(corpus_chunk)} corpuses from {transformsmode} division")   
+    for corpus_idx, corpus in tqdm(enumerate(corpus_chunk), total=len(corpus_chunk)):
+        with open(os.path.join(path, corpus, 'transforms.json')) as json_file:
+            contents = json.load(json_file)
+            if 'intrinsics' in contents:
+                intrinsics_shared = contents["intrinsics"]
+                _fx, _fy, _, _ = intrinsics_shared
+                
+                fx_real = -1 * _fx / 2.0 * width #!FaceTalk convention fx fy must be flipped - -> +
+                fy_real = -1 * _fy / 2.0 * height
+                fovx = focal2fov(fx_real, width) #! checked
+                fovy = focal2fov(fy_real, height) #! checked
+            # breakpoint()
+            if 'cam' in contents:   
+                w2c_shared = np.array(contents["cam"]).squeeze()
+                
+                w2c_shared[0, :] *= -1 #! x axis
+                w2c_shared[1, :] *= -1 #! y axis
+                # w2c_shared[:3, 1] *= -1 #! T
+                # change from MakeHuman axes (X left Y up, Z forward) 
+                # to COLMAP (X right Y down, Z forward)
+                R = np.transpose(w2c_shared[:3,:3])
+                T = w2c_shared[:3, 3]
+            frames = contents["frames"]
+            shape_shared = np.array(contents["shape"], dtype=np.float32).squeeze()
+            # for idx, frame in tqdm(enumerate(frames), total=len(frames)):
+            for idx, frame in enumerate(frames):
+                file_path = frame["file_path"]
+                bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+                image_path = os.path.join(path, corpus, file_path)
+                image_name = Path(f'{corpus}_{os.path.basename(file_path)}').stem   
+                
+                mask_path = image_path.replace('images', 'masks')
+                mask_name = image_name
+                
+                normal_path = image_path.replace('images', 'normals')
+                normal_name = image_name
+                
+                # breakpoint()
+                normal = None; mask = None #! auxiliary information
+                if 'w' in frame and 'h' in frame:
+                    image = None
+                    # mask = None
+                    width = frame['w']
+                    height = frame['h']
+                else:
+                    image = Image.open(image_path)
+                    im_data = np.array(image.convert("RGBA"))
+                    norm_data = im_data / 255.0
+                    arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+                    image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+                    width, height = image.size
+                    
+                    # mask = None
+                    
+                timestep = GLOBAL_IDX
+                
+                cam_infos.append(CameraInfo(
+                        uid=GLOBAL_IDX, R=R, T=T, FovY=fovy, FovX=fovx, bg=bg, image=image, mask=mask, normal=normal,
+                        mask_path=mask_path, mask_name=mask_name,   
+                        image_path=image_path, image_name=image_name, 
+                        normal_path=normal_path, normal_name=normal_name,
+                        width=width, height=height, 
+                        timestep=timestep, camera_id=camera_id))
+                
+                flame_param = dict()
+                
+                flame_param['translation'] = np.zeros((1,3), dtype=np.float32)
+                pose_correctives = np.array(frame['pose'], dtype=np.float32)
+                flame_param['rotation'] = pose_correctives[:,:3]
+                # breakpoint()
+                flame_param['neck_pose'] = pose_correctives[:,3:6] #!?????
+                flame_param['jaw_pose'] = pose_correctives[:,6:9]
+                flame_param['eyes_pose'] = pose_correctives[:,9:] #! 6
+                flame_param['shape'] = shape_shared  #! GA (300,)
+                flame_param['expr'] = np.array(frame['expression'], dtype=np.float32) #! GA (1,100)
+                flame_param['static_offset'] = np.zeros((1,5143,3), dtype=np.float32)
+                # breakpoint()
+                mesh_infos[timestep] = flame_param 
+                GLOBAL_IDX += 1
+    
+    number_of_frames = GLOBAL_IDX - GLOBAL_IDX_from
+    
+    print(f"Total {number_of_frames} frames read from {transformsmode} division")
+    # breakpoint()
+    if transformsmode == 'val':
+        return cam_infos, mesh_infos#, GLOBAL_IDX
+    else:
+        return cam_infos, mesh_infos, GLOBAL_IDX
+    
+   
+
+
+
+def readMakeHumanInfo(path, white_background, eval, extension=".png", target_path=""):
+    print("Reading Training Corpuses and Meshes")
+    
+    GLOBAL_IDX  = 0
+    if target_path != "":
+        train_cam_infos, train_mesh_infos = readCamerasMeshesFromCorpuses(target_path, "train", white_background, extension)
+        print("Reading Target Meshes (Training Division)")
+        tgt_train_mesh_infos = readMeshesFromCorpuses(target_path, "train")
+    else:#!
+        train_cam_infos, train_mesh_infos, GLOBAL_IDX = readCamerasMeshesFromCorpuses(path, "train", white_background, extension, GLOBAL_IDX)
+        tgt_train_mesh_infos = {}
+    
+    # print("Reading Training Meshes")
+    # train_mesh_infos = readMeshesFromCorpuses(path, "train")
+    # if target_path != "":
+    #     print("Reading Target Meshes (Training Division)")
+    #     tgt_train_mesh_infos = readMeshesFromCorpuses(target_path, "train")
+    # else:
+    #     tgt_train_mesh_infos = {}
+    
+    print("Reading Validation Corpuses")
+    if target_path != "":
+        val_cam_infos, _ = readCamerasMeshesFromCorpuses(target_path, "val", white_background, extension) #!
+    else:
+        val_cam_infos, _ = readCamerasMeshesFromCorpuses(path, "val", white_background, extension, GLOBAL_IDX)
+        #! Do not update GLOBAL_IDX
+    
+    print("Reading Test Corpuses and Meshes")
+    if target_path != "":
+        train_cam_infos, train_mesh_infos = readCamerasMeshesFromCorpuses(target_path, "test", white_background, extension)
+        print("Reading Target Meshes (test Division)")
+        tgt_test_mesh_infos = readMeshesFromCorpuses(target_path, "test")
+    else:
+        test_cam_infos, test_mesh_infos, GLOBAL_IDX = readCamerasMeshesFromCorpuses(path, "test", white_background, extension, GLOBAL_IDX)
+        tgt_test_mesh_infos = {}
+    # breakpoint()
+    # print("Reading Test CorpureadMeshesFromCorpuses")
+    # if target_path != "":
+    #     test_cam_infos = readCamerasFromCorpuses(target_path, "test", white_background, extension)
+    # else:
+    #     test_cam_infos = readCamerasFromCorpuses(path, "test", white_background, extension)
+    
+    # print("Reading Test Meshes")
+    # test_mesh_infos = readMeshesFromCorpuses(path, "test")
+    # if target_path != "":
+    #     print("Reading Target Meshes (Test Division)")
+    #     tgt_test_mesh_infos = readMeshesFromCorpuses(target_path, "test")
+    # else:
+    #     tgt_test_mesh_infos = {}
+    
+    if target_path != "" or not eval:
+        train_cam_infos.extend(val_cam_infos)
+        val_cam_infos = []
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+        train_mesh_infos.update(test_mesh_infos)
+        test_mesh_infos = {}
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    scene_info = SceneInfo(point_cloud=None,
+                           train_cameras=train_cam_infos,
+                           val_cameras=val_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=None,
+                           train_meshes=train_mesh_infos,
+                           test_meshes=test_mesh_infos,
+                           tgt_train_meshes=tgt_train_mesh_infos,
+                           tgt_test_meshes=tgt_test_mesh_infos)
+    return scene_info
 
 def readDynamicNerfInfo(path, white_background, eval, extension=".png", target_path=""): #!
     print("Reading Training Transforms")
@@ -365,4 +624,32 @@ sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "DynamicNerf" : readDynamicNerfInfo,
     "Blender" : readNerfSyntheticInfo,
+    "MakeHuman" : readMakeHumanInfo,
 }
+
+# FaceTalk_train_corpuses = ['bareteeth','cheeks_in', 'eyebrow', 'high_smile', \
+#     'lips_back', 'lips_up', 'mouth_down', 'mouth_extreme', 'mouth_middle', 'mouth_open', \
+#         'mouth_side', 'mouth_up', 'sentence01', 'sentence02', 'sentence03', 'sentence04', ]
+#             # 'sentence05', 'sentence06', 'sentence07', 'sentence08', 'sentence09', 'sentence10', \
+#             #     'sentence11', 'sentence12', 'sentence13', 'sentence14', 'sentence15', 'sentence16', \
+#             #         'sentence17', 'sentence18', 'sentence19', 'sentence20', 'sentence21', 'sentence22', \
+#             #             'sentence23', 'sentence24', 'sentence25', 'sentence26', 'sentence27', 'sentence28', \
+#             #                 'sentence29', 'sentence30', 'sentence31', 'sentence32', 'sentence33', 'sentence34', \
+#             #                     'sentence35', 'sentence36', 'sentence37' ]
+# FaceTalk_val_corpuses = ['bareteeth'] #! 무조건 첫번째 트레인 첫번쨰 코퍼스부터 순차적으로 사용해야함.
+# FaceTalk_test_corpuses = ['sentence38','sentence39']#'sentence40']
+
+
+FaceTalk_train_corpuses = ['sentence01', 'sentence02', 'sentence03', 'sentence04', \
+            'sentence05', 'sentence06', 'sentence07', 'sentence08', 'sentence09', 'sentence10', \
+                'sentence11', 'sentence12', 'sentence13', 'sentence14', 'sentence15', 'sentence16', \
+                    'sentence17', 'sentence18', 'sentence19', 'sentence20', 'sentence21', 'sentence22', \
+                        'sentence23', 'sentence24', 'sentence25', 'sentence26', 'sentence27', 'sentence28', \
+                            'sentence29', 'sentence30', 'sentence31', 'sentence32','sentence33', 'sentence34', \
+                                'sentence35', 'sentence36', 'sentence37','sentence38','sentence39','sentence40']
+
+FaceTalk_val_corpuses = ['sentence01', 'sentence02']
+
+FaceTalk_test_corpuses = ['bareteeth','cheeks_in', 'eyebrow', 'high_smile', \
+                            'lips_back', 'lips_up', 'mouth_down', 'mouth_extreme', 'mouth_middle', 'mouth_open', \
+                                'mouth_side', 'mouth_up']

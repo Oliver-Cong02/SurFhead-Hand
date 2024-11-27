@@ -146,8 +146,6 @@ class GaussianModel:
         self.tight_visibility_mask = tight_visibility_mask
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
-       
-
     
     @property
     def get_sg_features(self):
@@ -300,8 +298,6 @@ class GaussianModel:
             # Toyota Motor Europe NV/SA and its affiliated companies retain all intellectual property and proprietary rights in and to the following code lines and related documentation. Any commercial use, reproduction, disclosure or distribution of these code lines and related documentation without an express license agreement from Toyota Motor Europe NV/SA is strictly prohibited.
             if self.face_center is None:
                 self.select_mesh_by_timestep(0)
-     
-
             
             if self.DTF:
             # if True:
@@ -316,7 +312,6 @@ class GaussianModel:
 
                 global_scaling = self.face_scaling[self.binding]
                 xyz_cano = global_scaling[...,None]*torch.bmm(self.face_orien_mat[self.binding], self._xyz[..., None])#.squeeze(-1)
-                # xyz_posed = torch.bmm(self.blended_Jacobian, xyz_cano).squeeze(-1) + self.face_center[self.binding]
                 xyz_posed = torch.bmm(self.blended_Jacobian, xyz_cano).squeeze(-1) + self.face_center[self.binding]
             
                 return xyz_posed
@@ -331,8 +326,6 @@ class GaussianModel:
             if self.face_center is None:
                 self.select_mesh_by_timestep(0)
      
-
-            
             if self.DTF:
             
                 global_scaling = self.face_scaling[self.binding]
@@ -356,8 +349,6 @@ class GaussianModel:
             # Toyota Motor Europe NV/SA and its affiliated companies retain all intellectual property and proprietary rights in and to the following code lines and related documentation. Any commercial use, reproduction, disclosure or distribution of these code lines and related documentation without an express license agreement from Toyota Motor Europe NV/SA is strictly prohibited.
             if self.face_center is None:
                 self.select_mesh_by_timestep(0)
-    
-            
             
             if self.DTF:#! JRr + T_posed
            
@@ -367,8 +358,6 @@ class GaussianModel:
                 return xyz_posed 
 
             else:
-              
-                    
                 xyz = torch.bmm(self.face_orien_mat[self.binding], self._xyz[..., None]).squeeze(-1)
                 global_scaling = self.face_scaling[self.binding]
                 return xyz * global_scaling + self.face_center[self.binding]
@@ -393,6 +382,12 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
     
+    def compute_isotropic_loss(self):
+        # breakpoint()
+        scaling_mean = torch.mean(self.get_scaling, dim=1)
+        L_1_loss = torch.mean(torch.abs(self.get_scaling - scaling_mean[...,None]))
+        return L_1_loss
+    
     def select_mesh_by_timestep(self, timestep):
         raise NotImplementedError
 
@@ -401,6 +396,7 @@ class GaussianModel:
             self.active_sh_degree += 1
 
     def create_from_pcd(self, pcd : Optional[BasicPointCloud], spatial_lr_scale : float):
+        # breakpoint()
         self.spatial_lr_scale = spatial_lr_scale
         if pcd == None:
             assert self.binding is not None
@@ -566,7 +562,8 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
         # breakpoint()
-        xyz = self._xyz.detach().cpu().numpy()
+        # xyz = self._xyz.detach().cpu().numpy()
+        xyz = self.get_xyz.detach().cpu().numpy()
         if self.train_normal:
             normals = self._normal.detach().cpu().numpy()
             normals2 = self._normal2.detach().cpu().numpy()
@@ -967,8 +964,7 @@ class GaussianModel:
             # self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_normal, new_normal2)
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_feature_sg,new_normal, new_normal2, new_blend_weight)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, \
-              detach_eyeball_geometry=False):#, tight_pruning=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):#, tight_pruning=False):
         # if tight_pruning:
         #     killing_mask = torch.logical_not(self.tight_visibility_mask)
         #     # breakpoint()
@@ -996,20 +992,6 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         
-        
-        if detach_eyeball_geometry:
-            eyeball_mask = torch.isin(self.binding, self.flame_model.mask.f.eyeballs)
-
-            print(eyeball_mask.sum(), 'EYEBALLS::Check the number of eyeballs')
-            eyeball_indices = torch.nonzero(eyeball_mask).squeeze(1)
-            grads[eyeball_indices] = 0.0
-            # grads_abs[eyeball_indices] = 0.0
-        # if detach_teeth_geometry:
-        #     teeth_mask = torch.isin(self.binding, self.flame_model.mask.f.teeth)
-        #     print(teeth_mask.sum(), 'TEETH')
-        #     teeth_indices = torch.nonzero(teeth_mask).squeeze(1)
-        #     grads[teeth_indices] = 0.0
-            # grads_abs[teeth_indices] = 0.0
             
         # ratio = (torch.norm(grads, dim=-1) >= max_grad).float().mean()
         # Q = torch.quantile(grads_abs.reshape(-1), 1 - ratio)
@@ -1036,9 +1018,6 @@ class GaussianModel:
             # prune_mask torch.Size([11458])
             # breakpoint()
        
-            
-         
-       
         self.prune_points(prune_mask)
 
         # self.tight_visibility_mask = torch.zeros_like(self.tight_visibility_mask)
@@ -1049,28 +1028,12 @@ class GaussianModel:
         torch.cuda.empty_cache()
         return clone - before, split - clone, split - prune
     
-        
+    def add_densification_stats_my(self, viewspace_point_tensor_grad, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1
 
-
-
-    def add_densification_stats(self, viewspace_point_tensor, update_filter, amplify_teeth_grad=False):
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
         # breakpoint()
-        # self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        # self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
-        if amplify_teeth_grad:
-            # breakpoint()
-            teeth_mask = torch.isin(self.binding, self.flame_model.mask.f.teeth)
-            # teeth_lower_mask = torch.isin(self.binding, self.flame_model.mask.f.teeth_lower)
-            teeth_indices = torch.nonzero(teeth_mask).squeeze(1)
-            
-            viewspace_point_tensor.grad[teeth_indices] *= 20
-            # breakpoint()
-        # if self.densification_type == 'arithmetic_mean':
-        # self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        # self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
-        # self.xyz_gradient_accum_abs_max[update_filter] = torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
-     
-        # self.denom[update_filter] += 2
         
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1

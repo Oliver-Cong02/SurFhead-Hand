@@ -1,12 +1,15 @@
 .tensorboard-info/
 submodules/simple-knn
 submodules/diff-gaussian-rasterization
+submodules/manopth
+.cache/
 output_final_original/
 output_final/
 ICLR2025_assets/
 test_cluster_internal.sh
 train_cluster_internal.sh
 
+sbatch_info/
 output_0719/
 *.mp4
 output_pivot_0508/

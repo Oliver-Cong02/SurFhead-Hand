@@ -56,12 +56,41 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        self.skip_train_ = False
+        self.skip_test_ = False
+        self.skip_val_ = False
         self.bind_to_mesh = False
         self.disable_flame_static_offset = False
         self.not_finetune_flame_params = False
         self.select_camera_id = -1
-        self.backface_culling_smooth = False
-        self.backface_culling_hard = False
+
+        # ------- xiaoyan -------- #
+        self.subject = "xcong2"
+        self.exp_name = "test"
+        self.grasp_path = "/users/xcong2/data/datasets/MANUS_data/chandradeep/grasps/color2_grasp1/meta_data.pkl"
+        self.raw_video_dir = "/users/xcong2/data/datasets/BRICS/BRICS-DATA-02/neural-hands/chandradeep/grasps/2023-10-27_session_color2_grasp1/synced"
+        self.obj_mesh_paths = ""
+        # self.raw_video_dir = "/users/xcong2/data/brics/non-pii/brics-mini/2024-09-11-action-yixin-instrument-varun-files"
+        # self.ith = 28
+        # self.mano_param_path = f"/users/xcong2/data/datasets/Action/brics-mini/2024-09-11-action-yixin-instrument-varun-files/params/{self.ith:03d}.json"
+        # self.cam_path = "/users/xcong2/data/datasets/Action/brics-mini/2024-09-11-action-yixin-instrument-varun-files/optim_params.txt"
+        self.cam_path = "/users/xcong2/data/datasets/MANUS_data/chandradeep/calib.object/optim_params.txt"
+        self.masks_path = "/users/xcong2/data/users/xcong2/projects/SurFhead/.cache/color2_grasp1/dilated_masks"
+        self.width = 1280
+        self.height = 720
+        self.near = 0.01
+        self.far = 100
+        self.step_size = 10
+        self.start_frame_idx = 300 # 300, debug: 500
+        self.bg_color = "black"
+        self.val_camera_name = "brics-sbc-005_cam0" # 
+        self.merge_train_val = False
+        self.test_start_frame_idx = 500 # 600
+        self.end_frame_idx = 520 # 540 # 660
+        self.not_finetune_MANO_params = False
+        self.sample_obj_pts_num = 100000 # 20000
+        self.jump = 1
+        # ------------------------ #
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -75,7 +104,6 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.depth_ratio = 0.0
         self.debug = False
-        self.backface_culling_smooth_sigma = 1.0
         self.tight_pruning = False
         self.tight_pruning_threshold = 0.1
         self.train_kinematic = False
@@ -84,12 +112,7 @@ class PipelineParams(ParamGroup):
         self.invT_Jacobian = False
         self.SGs = False
         self.sg_type = 'asg'
-        self.detach_eyeball_geometry = False
-        self.detach_teeth_geometry = False
-        self.spec_only_eyeball = False
-        self.spec_only_teeth = False
         self.rotSH = False
-        self.amplify_teeth_grad = False
         self.detach_boundary = False
         self.train_kinematic_dist = False
         super().__init__(parser, "Pipeline Parameters")
@@ -97,23 +120,40 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         # 3D Gaussians
-        self.iterations = 600_000  # 30_000 (original)
-        self.position_lr_init = 0.005  # (scaled up according to mean triangle scale)  #0.00016 (original)#! *1/0.032
-        self.position_lr_final = 0.00005  # (scaled up according to mean triangle scale) # 0.0000016 (original)
+        self.iterations = 120_000  # 30_000 (original)
+        self.mask_iterations = self.iterations // 3
+        self.position_lr_init = 0.016  # (scaled up according to mean triangle scale)  #0.00016 (original)#! *1/0.032
+        self.position_lr_final = 0.00016  # (scaled up according to mean triangle scale) # 0.0000016 (original)
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 600_000  # 30_000 (original)
+        self.position_lr_max_steps = self.iterations  # 30_000 (original)
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
-        self.scaling_lr = 0.017  # (scaled up according to mean triangle scale)  # 0.005 (original)
+        self.scaling_lr = 0.023  # (scaled up according to mean triangle scale)  # 0.005 (original)
         self.rotation_lr = 0.001
         self.blend_weight_lr = 0.001
-        self.densification_interval = 2_000  # 100 (original)
-        self.opacity_reset_interval = 60_000 # 3000 (original)
-        self.densify_from_iter = 10_000  # 500 (original)
-        self.densify_until_iter = 600_000  # 15_000 (original)
+        self.densification_interval = self.iterations // 300 # 400  # 100 (original)
+        self.opacity_reset_interval = self.iterations // 10 # 12_000 # 3000 (original)
+        self.densify_from_iter = self.iterations // 15 # 2_000  # 500 (original)
+        self.densify_until_iter = self.iterations * 2 // 3  # 15_000 (original)
         self.densify_grad_threshold = 0.0002
+
+        # isotropic loss
+        self.lambda_isotropic_weight = 0.001
+        self.isotropic_loss_iter = 0
+
         
-        
+        # Object parameters
+        self.obj_position_lr_init = 0.00016
+        self.obj_position_lr_final = 0.0000016
+        self.obj_position_lr_delay_mult = 0.01
+        self.obj_position_lr_max_steps = self.iterations
+        self.obj_feature_lr = 0.0025
+        self.obj_opacity_lr = 0.05
+        self.obj_scaling_lr = 0.005
+        self.obj_rotation_lr = 0.001
+        self.obj_percent_dense = 0.01
+
+
         # GaussianAvatars
         self.flame_expr_lr = 1e-3
         self.flame_trans_lr = 1e-6
@@ -129,8 +169,16 @@ class OptimizationParams(ParamGroup):
         self.lambda_dynamic_offset = 0.
         self.lambda_laplacian = 0.
         self.lambda_dynamic_offset_std = 0  #1.
+
+        self.lambda_normal_iteration = int(self.iterations * 0.5) # 0.3
+        self.lambda_dist_iteration = int(self.iterations * 0.1)
         
-     
+             # Xiaoyan: MANO optimization parameters
+        self.mano_pose_lr = 0.0001
+        self.mano_shape_lr = 0.0001
+        self.mano_trans_lr = 0.000001
+        self.mano_scale_lr = 0.000001
+
 
         #! for 2dgs
         self.percent_dense = 0.01

@@ -19,7 +19,7 @@ from utils.loss_utils import l1_loss, ssim, laplacian_loss, laplacian_loss_U, ge
 from gaussian_renderer import render, network_gui
 from mesh_renderer import NVDiffRenderer
 import sys
-from scene import Scene, GaussianModel, FlameGaussianModel, SpecularModel
+from scene import Scene, GaussianModel, UniGaussians
 from utils.general_utils import safe_state, colormap
 import uuid
 from tqdm import tqdm
@@ -40,31 +40,18 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     
-    if pipe.SGs:
-        # tb_writer = prepare_output_and_logger(dataset)
-        specular_mlp = SpecularModel(sg_type=pipe.sg_type)
-        specular_mlp.train_setting(opt)
-    else:
-        specular_mlp = None
+    specular_mlp = None
     tb_writer = prepare_output_and_logger(dataset)
     if dataset.bind_to_mesh:#!
         
         train_normal = False
-        if os.path.basename(dataset.source_path).startswith("FaceTalk"):
-            # breakpoint()
-            n_shape = 100    
-            n_expr = 50
-        else:
-            n_shape = 300
-            n_expr = 100    
-        
         cal_laplacian = False
        
     
-        gaussians = FlameGaussianModel(dataset.sh_degree, dataset.sg_degree, dataset.disable_flame_static_offset, dataset.not_finetune_flame_params,\
-            train_normal = train_normal, n_shape=n_shape, n_expr=n_expr, train_kinematic=pipe.train_kinematic, train_kinematic_dist = pipe.train_kinematic_dist,\
-            DTF = pipe.DTF, invT_Jacobian=pipe.invT_Jacobian,
-                densification_type=opt.densification_type, detach_eyeball_geometry = pipe.detach_eyeball_geometry,detach_boundary = pipe.detach_boundary)
+        uni_gaussians = UniGaussians(sh_degree=dataset.sh_degree, not_finetune_MANO_params=dataset.not_finetune_MANO_params, sample_obj_pts_num=dataset.sample_obj_pts_num,
+                                     train_normal = train_normal, train_kinematic=pipe.train_kinematic, train_kinematic_dist = pipe.train_kinematic_dist, 
+                                     DTF = pipe.DTF, invT_Jacobian=pipe.invT_Jacobian, obj_mesh_paths=dataset.obj_mesh_paths)
+
         try:
             mesh_renderer = NVDiffRenderer()
         except:
@@ -72,11 +59,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             print("Mesh renderer not available")
     else:
         gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt) #! from here all trainble parameters are set(e.g., flame_codes, xyz, scaling, dynamic_offset, opacity)
+    scene = Scene(dataset, uni_gaussians)
+    uni_gaussians.hand_gaussian_model.training_setup(opt)
+    uni_gaussians.obj_gaussian_model.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        uni_gaussians.hand_gaussian_model.restore(model_params, opt)
+        uni_gaussians.obj_gaussian_model.restore(model_params, opt)
     # breakpoint()
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -84,7 +73,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    loader_camera_train = DataLoader(scene.getTrainCameras(), batch_size=None, shuffle=False, num_workers=8, pin_memory=True, persistent_workers=True)
+    num_workers = 16 # 8
+    shuffle = False
+
+    loader_camera_train = DataLoader(scene.getTrainCameras(), batch_size=None, shuffle=shuffle, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     iter_camera_train = iter(loader_camera_train)
    
     ema_loss_for_log = 0.0
@@ -94,65 +86,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
-    
-    
-    
     for iteration in range(first_iter, opt.iterations + 1):     
       
         # han_window_iter = iteration * 2/(opt.iterations + 1)  
         han_window_iter = iteration /(opt.iterations + 1)  
 
-        if network_gui.conn == None:
-            network_gui.try_connect()
-            
-        # breakpoint()
-        while network_gui.conn != None:
-            try:
-                # receive data
-                net_image = None
-                
-                custom_cam, msg = network_gui.receive()
-
-                # render
-                if custom_cam != None:
-                    # mesh selection by timestep
-                    if gaussians.binding != None:
-                        gaussians.select_mesh_by_timestep(custom_cam.timestep, msg['use_original_mesh'])
-                    
-                    # gaussian splatting rendering
-                    if msg['show_splatting']:
-                        net_image = render(custom_cam, gaussians, pipe, background, msg['scaling_modifier'])["render"]
-                    
-                    # mesh rendering
-                    if gaussians.binding != None and msg['show_mesh']:
-                        out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, custom_cam)
-
-                        rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
-                        rgb_mesh = rgba_mesh[:3, :, :]
-                        alpha_mesh = rgba_mesh[3:, :, :]
-
-                        mesh_opacity = msg['mesh_opacity']
-                        if net_image is None:
-                            net_image = rgb_mesh
-                        else:
-                            net_image = rgb_mesh * alpha_mesh * mesh_opacity  + net_image * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
-
-                    # send data
-                    net_dict = {'num_timesteps': gaussians.num_timesteps, 'num_points': gaussians._xyz.shape[0]}
-                    network_gui.send(net_image, net_dict)
-                if msg['do_training'] and ((iteration < int(opt.iterations)) or not msg['keep_alive']):
-                    break
-            except Exception as e:
-                # print(e)
-                network_gui.conn = None
-
         iter_start.record()
 
-        gaussians.update_learning_rate(iteration)
+        uni_gaussians.hand_gaussian_model.update_learning_rate(iteration)
+        uni_gaussians.obj_gaussian_model.update_learning_rate(iteration)
+
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
+            uni_gaussians.hand_gaussian_model.oneupSHdegree()
+            uni_gaussians.obj_gaussian_model.oneupSHdegree()
 
         try:
             viewpoint_cam = next(iter_camera_train)
@@ -160,70 +108,38 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             iter_camera_train = iter(loader_camera_train)
             viewpoint_cam = next(iter_camera_train)
 
-        if gaussians.binding != None:
-            gaussians.select_mesh_by_timestep(viewpoint_cam.timestep)
+        if uni_gaussians.hand_gaussian_model.binding != None:
+            uni_gaussians.hand_gaussian_model.select_mesh_by_timestep(viewpoint_cam.timestep)
 
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-            
-        kick_in_SGs = 2500 #! This works best for growing up SHs
+     
+        specular_color = None
         
-
-        if iteration > kick_in_SGs and pipe.SGs:
-            if pipe.train_kinematic or pipe.train_kinematic_dist:
-                dir_pp = (gaussians.get_blended_xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1).cuda())
-                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                normal = gaussians.get_normal
-                normal_normalised = F.normalize(normal,dim=-1).detach()
-                # breakpoint()
-                
-                normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                if pipe.rotSH:
-                    dir_pp_normalized = (gaussians.blended_R.permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
-            else:
-                dir_pp = (gaussians.get_xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1).cuda())
-                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                normal = gaussians.get_normal
-                normal_normalised = F.normalize(normal,dim=-1).detach()
-                # breakpoint()
-                
-                normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                if pipe.rotSH:
-                    assert pipe.DTF
-                    dir_pp_normalized = (gaussians.face_R_mat[gaussians.binding].permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
-  
-           
-            if pipe.spec_only_eyeball:
-                # breakpoint()
-                mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.eyeballs)
-                points_indices = torch.nonzero(mask).squeeze(1)
-                
-                specular_color_eyeballs = specular_mlp.step(gaussians.get_sg_features[points_indices], dir_pp_normalized[points_indices], normal[points_indices].detach(), sg_type = pipe.sg_type)
-                
-                
-                specular_color = specular_color_eyeballs
-            else:
-                specular_color = specular_mlp.step(gaussians.get_sg_features, dir_pp_normalized, normal.detach(), sg_type = pipe.sg_type)
-    
-        else:
-            specular_color = None
-        
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background,
-                                            backface_culling_smooth = dataset.backface_culling_smooth,
-                                            backface_culling_hard = dataset.backface_culling_hard,
+        render_pkg = render(viewpoint_cam, uni_gaussians, pipe, background,
                                             iter = han_window_iter,
-                                            specular_color= specular_color,
-                                            spec_only_eyeball = pipe.spec_only_eyeball)
+                                            specular_color= specular_color)
                                         
-        
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
        
         
         # visibility_filter_tight = render_pkg.get("visibility_filter_tight", None)
         
         gt_image = viewpoint_cam.original_image.cuda()
-        
+        mask = viewpoint_cam.original_mask.cuda()
+        # breakpoint()
+        if iteration > opt.mask_iterations:
+            # print("Masked")
+            # image = image * mask
+            gt_image = gt_image * mask
+
+        gaussians = uni_gaussians.hand_gaussian_model
+        obj_visibility_filter = visibility_filter[:-gaussians.binding.shape[0]]
+        obj_radii = radii[:-gaussians.binding.shape[0]]
+
+        visibility_filter = visibility_filter[-gaussians.binding.shape[0]:]
+        radii = radii[-gaussians.binding.shape[0]:]
        
         losses = {}
         losses['l1'] = l1_loss(image, gt_image) * (1.0 - opt.lambda_dssim)
@@ -234,24 +150,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if opt.lambda_laplacian != 0:
                 pre_compute_laplacian = gaussians.recalculate_points_laplacian()
         #! from 2dgs
+
+        if opt.lambda_isotropic_weight != 0 and iteration > opt.isotropic_loss_iter:
+            # breakpoint()
+            losses['isotropic'] = opt.lambda_isotropic_weight * uni_gaussians.obj_gaussian_model.compute_isotropic_loss()
+            # losses['isotropic'] = opt.lambda_isotropic_weight * (uni_gaussians.obj_gaussian_model.compute_isotropic_loss() + uni_gaussians.hand_gaussian_model.compute_isotropic_loss()) / 2.0
+
         # regularization
-        if os.path.basename(dataset.source_path).startswith("FaceTalk"):
+
+        if opt.iterations < 600000:
             lambda_normal = opt.lambda_normal if iteration > 70000 else 0.0
             lambda_dist = opt.lambda_dist if iteration > 30000 else 0.0
         else:
-            if opt.iterations < 600000:
-                lambda_normal = opt.lambda_normal if iteration > 70000 else 0.0
-                lambda_dist = opt.lambda_dist if iteration > 30000 else 0.0
-            else:
-                lambda_normal = opt.lambda_normal if iteration > 140000 else 0.0
-                lambda_dist = opt.lambda_dist if iteration > 60000 else 0.0
-
-        if opt.lambda_eye_alpha != 0:
-            # normal = gaussians.get_normal
-            mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.eyeballs)
-            
-            points_indices = torch.nonzero(mask).squeeze(1)
-            losses['eye_alpha'] = ((gaussians.get_opacity[points_indices] - 1) ** 2).mean() * opt.lambda_eye_alpha
+            lambda_normal = opt.lambda_normal if iteration > 140000 else 0.0
+            lambda_dist = opt.lambda_dist if iteration > 60000 else 0.0
 
         if opt.lambda_blend_weight != 0:
         
@@ -342,16 +254,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         losses['total'] = sum([v for k, v in losses.items()])
         
         losses['total'].backward()
-        if pipe.detach_eyeball_geometry:
-            mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.eyeballs)
-
-
-            points_indices = torch.nonzero(mask).squeeze(1)
-            gaussians._xyz.grad[points_indices] = 0
-            gaussians._rotation.grad[points_indices] = 0
-            if pipe.train_kinematic:
-                gaussians.blend_weight.grad[points_indices] = 0
-            
+        
         if pipe.detach_boundary:
             boundary_mask = torch.isin(gaussians.binding, gaussians.flame_model.mask.f.boundary)
             boundary_indices = torch.nonzero(boundary_mask).squeeze(1)
@@ -401,10 +304,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
        
                 if 'lap_lbs' in losses:
                     postfix['lap_lbs'] = f"{losses['lap_lbs']:.{7}f}"
-                if 'convex_eyeballs' in losses:
-                    postfix['convex_eyeballs'] = f"{losses['convex_eyeballs']:.{7}f}"
-                if 'eye_alpha' in losses:
-                    postfix['eye_alpha'] = f"{losses['eye_alpha']:.{7}f}"
+                if 'isotropic' in losses:
+                    postfix['isotropic'] = f"{losses['isotropic']:.{7}f}"
             
                 progress_bar.set_postfix(postfix)
                 progress_bar.update(10)
@@ -412,51 +313,66 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            render_args = (pipe, background, 1.0, None, dataset.backface_culling_smooth, dataset.backface_culling_hard, han_window_iter)
+            render_args = (pipe, background, 1.0, None, han_window_iter)
             
        
             training_report(tb_writer, iteration, losses, iter_start.elapsed_time(iter_end), \
                             testing_iterations, scene, render, render_args, specular_mlp)
+            
             if (iteration in saving_iterations):
                 print("[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-                if pipe.SGs and iteration > kick_in_SGs:
-                    specular_mlp.save_weights(args.model_path, iteration)
 
+            viewspace_point_tensor_grad = viewspace_point_tensor.grad
+            obj_viewspace_point_tensor_grad = viewspace_point_tensor_grad[:-gaussians.binding.shape[0]]
+            hand_viewspace_point_tensor_grad = viewspace_point_tensor_grad[-gaussians.binding.shape[0]:]
+            # breakpoint()
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, pipe.amplify_teeth_grad)
+                gaussians.add_densification_stats_my(hand_viewspace_point_tensor_grad, visibility_filter)
                
-        
-                    
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     #! 10000 12000 ...
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold,
-                                                pipe.detach_eyeball_geometry)
-
-                
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     #! 10000 60000 120000 ...
                     
                     gaussians.reset_opacity()
 
+            # # Object Densification
+            # if iteration < opt.densify_until_iter:
+            #     # import ipdb; ipdb.set_trace()
+            #     gaussians = uni_gaussians.obj_gaussian_model
+            #     visibility_filter = obj_visibility_filter
+            #     radii = obj_radii
+            #     # Keep track of max radii in image-space for pruning
+            #     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+            #     gaussians.add_densification_stats_my(obj_viewspace_point_tensor_grad, visibility_filter)
+
+            #     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+            #         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                
+            #     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+            #         gaussians.reset_opacity()
+
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+                uni_gaussians.hand_gaussian_model.optimizer.step()
+                uni_gaussians.hand_gaussian_model.optimizer.zero_grad(set_to_none = True)
+                uni_gaussians.obj_gaussian_model.optimizer.step()
+                uni_gaussians.obj_gaussian_model.optimizer.zero_grad(set_to_none = True)
             
-                if pipe.SGs and iteration > kick_in_SGs:
-                    specular_mlp.optimizer.step()
-                    specular_mlp.optimizer.zero_grad()
-                    specular_mlp.update_learning_rate(iteration)
-                    # breakpoint()
+
             if (iteration in checkpoint_iterations):
                 print("[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                torch.save((uni_gaussians.hand_gaussian_model.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + "_hand.pth")
+                torch.save((uni_gaussians.obj_gaussian_model.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + "_obj.pth")
+
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -538,51 +454,15 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
                 gt_image_cache = []
                 vis_ct = 0
                 for idx, viewpoint in tqdm(enumerate(DataLoader(config['cameras'], shuffle=False, batch_size=None, num_workers=8)), total=len(config['cameras'])):
-                    if scene.gaussians.num_timesteps > 1:
-                        scene.gaussians.select_mesh_by_timestep(viewpoint.timestep)
+                    if scene.uni_gaussians.hand_gaussian_model.num_timesteps > 1:
+                        scene.uni_gaussians.hand_gaussian_model.select_mesh_by_timestep(viewpoint.timestep)
                     
                     
                     
               
                     specular_color=None
-                    try:
-                        if renderArgs[0].train_kinematic or renderArgs[0].train_kinematic_dist:
-                            dir_pp = (scene.gaussians.get_blended_xyz - viewpoint.camera_center.repeat(
-                                scene.gaussians.get_features.shape[0], 1).cuda())
-                            dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                            normal_normalised=  F.normalize(scene.gaussians.get_normal,dim=-1).detach()
-                            normal = scene.gaussians.get_normal
-                            normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                            if renderArgs[0].rotSH:
-                                dir_pp_normalized = (scene.gaussians.blended_R.permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
 
-                        else:
-                            dir_pp = (scene.gaussians.get_xyz - viewpoint.camera_center.repeat(
-                                scene.gaussians.get_features.shape[0], 1).cuda())
-                            dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-                            normal_normalised=  F.normalize(scene.gaussians.get_normal,dim=-1).detach()
-                            normal = scene.gaussians.get_normal
-                            normal = normal * ((((dir_pp_normalized * normal_normalised).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-                            if renderArgs[0].rotSH:
-                                dir_pp_normalized = (scene.gaussians.face_R_mat[scene.gaussians.binding].permute(0,2,1) @ dir_pp_normalized[...,None]).squeeze(-1)
-                                
-                        if renderArgs[0].spec_only_eyeball:
-                            mask = torch.isin(scene.gaussians.binding, scene.gaussians.flame_model.mask.f.eyeballs)
-
-                            points_indices = torch.nonzero(mask).squeeze(1)
-                            
-                            specular_color_eyeballs = specular_mlp.step(scene.gaussians.get_sg_features[points_indices], dir_pp_normalized[points_indices], normal[points_indices], sg_type = renderArgs[0].sg_type)
-                            
-                          
-                            specular_color = specular_color_eyeballs
-                        
-                        else:
-                            specular_color = specular_mlp.step(scene.gaussians.get_sg_features, dir_pp_normalized, normal.detach(), sg_type = renderArgs[0].sg_type)
-                        # print('Specular Forwarded')
-                    except:
-                        pass
-                    # breakpoint()
-                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, specular_color, renderArgs[0].spec_only_eyeball)
+                    render_pkg = renderFunc(viewpoint, scene.uni_gaussians, *renderArgs, specular_color)
                     
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -643,8 +523,8 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
                         vis_ct += 1
                         
                         
-                    image = viewpoint.original_mask_face.cuda() * image
-                    gt_image = viewpoint.original_mask_face.cuda() * gt_image
+                    image = viewpoint.original_mask.cuda() * image
+                    gt_image = viewpoint.original_mask.cuda() * gt_image
                     # breakpoint()
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
@@ -670,14 +550,13 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - lpips', lpips_test, iteration)
-
         if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_histogram("scene/scale_histogram", torch.mean(scene.gaussians.get_scaling, dim=-1), iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+            tb_writer.add_histogram("scene/opacity_histogram", scene.uni_gaussians.get_opacity, iteration)
+            tb_writer.add_histogram("scene/scale_histogram", torch.mean(scene.uni_gaussians.get_scaling, dim=-1), iteration)
+            tb_writer.add_scalar('total_points', scene.uni_gaussians.get_xyz.shape[0], iteration)
             try:
                 tb_writer.add_histogram('scene/blend_weight_primary',\
-                    F.normalize(scene.gaussians.get_blend_weight, dim=-1)[...,:1], iteration)
+                    F.normalize(scene.uni_gaussians.hand_gaussian_model.get_blend_weight, dim=-1)[...,:1], iteration)
             except:
                 pass
         torch.cuda.empty_cache()

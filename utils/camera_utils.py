@@ -50,12 +50,9 @@ def loadCam(args, id, cam_info, resolution_scale):
                   mask_path=cam_info.mask_path,
                   mask_name=cam_info.mask_name,
                   normal = cam_info.normal,
-                    normal_path = cam_info.normal_path,
-                    normal_name = cam_info.normal_name,
-                    mask_face=cam_info.mask_face,
-                  mask_face_path=cam_info.mask_face_path,
-                  mask_face_name=cam_info.mask_face_name,
-                  uid=id, 
+                  normal_path = cam_info.normal_path,
+                  normal_name = cam_info.normal_name,
+                  uid=id, K=cam_info.K,
                   timestep=cam_info.timestep, data_device=args.data_device)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
@@ -87,6 +84,7 @@ def camera_to_JSON(id, camera : Camera):
         'position': pos.tolist(),
         'rotation': serializable_array_2d,
         'fy' : fov2focal(camera.FovY, camera.height),
-        'fx' : fov2focal(camera.FovX, camera.width)
+        'fx' : fov2focal(camera.FovX, camera.width),
+        'timestep': camera.timestep
     }
     return camera_entry

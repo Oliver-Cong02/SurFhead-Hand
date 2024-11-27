@@ -16,7 +16,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix, fov2focal,
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, bg, image_width, image, image_height, image_path,
-                 image_name, mask, mask_path, mask_name,  uid, trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
+                 image_name, mask, mask_path, mask_name,  uid, K=None, trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
                  timestep=None, data_device = "cuda", normal_path=None, normal_name=None, normal=None, mask_face_path=None, mask_face_name=None, mask_face=None,
                  ):
         super(Camera, self).__init__()
@@ -25,6 +25,7 @@ class Camera(nn.Module):
         self.colmap_id = colmap_id
         self.R = R
         self.T = T
+        self.K = K
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.bg = bg
