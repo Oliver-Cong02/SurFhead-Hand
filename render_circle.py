@@ -38,7 +38,7 @@ from utils.brics_utils.vis_util import plot_points_in_image, project, get_colors
 from utils.brics_utils.extra import *
 from utils.brics_utils.cam_utils import get_opengl_camera_attributes
 from scene.dataset_readers import CameraInfo
-from scene import SpecularModel
+
 #! import F
 import torch.nn.functional as F
 import glob
@@ -357,9 +357,6 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         specular = None
-        if pipeline.SGs:
-            specular = SpecularModel()
-            specular.load_weights(dataset.model_path)
         if dataset.target_path != "":
              name = os.path.basename(os.path.normpath(dataset.target_path))
              # when loading from a target path, test cameras are merged into the train cameras

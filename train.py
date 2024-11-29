@@ -247,9 +247,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if ti < gaussians.num_timesteps - 1:
                     t_indices.append(ti+1)
                 losses['dynamic_offset_std'] = gaussians.flame_param['dynamic_offset'].std(dim=0).mean() * opt.lambda_dynamic_offset_std
-        
-        
-
                 
         losses['total'] = sum([v for k, v in losses.items()])
         
@@ -449,7 +446,7 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
                 psnr_test = 0.0
                 ssim_test = 0.0
                 lpips_test = 0.0
-                num_vis_img = 10
+                num_vis_img = 10 if len(config['cameras']) > 10 else len(config['cameras'])
                 image_cache = []
                 gt_image_cache = []
                 vis_ct = 0
@@ -457,7 +454,7 @@ def training_report(tb_writer, iteration, losses, elapsed, testing_iterations, s
                     if scene.uni_gaussians.hand_gaussian_model.num_timesteps > 1:
                         scene.uni_gaussians.hand_gaussian_model.select_mesh_by_timestep(viewpoint.timestep)
                     
-                    
+                
                     
               
                     specular_color=None

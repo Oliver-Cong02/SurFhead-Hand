@@ -562,8 +562,8 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
         # breakpoint()
-        # xyz = self._xyz.detach().cpu().numpy()
-        xyz = self.get_xyz.detach().cpu().numpy()
+        xyz = self._xyz.detach().cpu().numpy()
+        # xyz = self.get_xyz.detach().cpu().numpy()
         if self.train_normal:
             normals = self._normal.detach().cpu().numpy()
             normals2 = self._normal2.detach().cpu().numpy()

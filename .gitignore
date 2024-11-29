@@ -29,7 +29,7 @@ diff_rasterization/dist
 tensorboard_3d
 screenshots
 job/
-*.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

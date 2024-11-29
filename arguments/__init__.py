@@ -47,7 +47,6 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
-        self.sg_degree = 24
         self._source_path = ""  # Path to the source data set
         self._target_path = ""  # Path to the target data set for pose and expression transfer
         self._model_path = ""  # Path to the folder to save trained models
@@ -120,8 +119,8 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         # 3D Gaussians
-        self.iterations = 120_000  # 30_000 (original)
-        self.mask_iterations = self.iterations // 3
+        self.iterations = 120_000  # 120000 #  30_000 (original)
+        self.mask_iterations = 0
         self.position_lr_init = 0.016  # (scaled up according to mean triangle scale)  #0.00016 (original)#! *1/0.032
         self.position_lr_final = 0.00016  # (scaled up according to mean triangle scale) # 0.0000016 (original)
         self.position_lr_delay_mult = 0.01
@@ -133,8 +132,8 @@ class OptimizationParams(ParamGroup):
         self.blend_weight_lr = 0.001
         self.densification_interval = self.iterations // 300 # 400  # 100 (original)
         self.opacity_reset_interval = self.iterations // 10 # 12_000 # 3000 (original)
-        self.densify_from_iter = self.iterations // 15 # 2_000  # 500 (original)
-        self.densify_until_iter = self.iterations * 2 // 3  # 15_000 (original)
+        self.densify_from_iter = self.iterations // 60 # 2_000  # 500 (original)
+        self.densify_until_iter = self.iterations # * 2 // 3  # 15_000 (original)
         self.densify_grad_threshold = 0.0002
 
         # isotropic loss
