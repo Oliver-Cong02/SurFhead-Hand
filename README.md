@@ -40,24 +40,6 @@ conda install pytorch torchvision pytorch-cuda=11.7 -c pytorch -c nvidia
 pip install -r requirements.txt
 ```
 
-### Data
-
-#### Preprocessed NeRSemble Dataset
-
-We use 9 subjects from NeRSemble dataset in our paper. We provide the pre-processed data with this OneDrive [link](https://tumde-my.sharepoint.com/:f:/g/personal/shenhan_qian_tum_de/EtgO7DSNVzNKuYMRQeL4PE0BqMsTwdpQ09puewDLQBz87A). Please request [here](https://forms.gle/dPEJx5DNvmhTm2Ry5) to get access and download it into `data/`.
-
-Please also request for the raw dataset [here](https://forms.gle/rYRoGNh2ed51TDWX9) although you do not need to download it to run this repo.
-
-
-#### FLAME Model
-
-Our code and the pre-processed data relies on FLAME 2023. Downloaded assets from https://flame.is.tue.mpg.de/download.php and store them in below paths:
-
-- `flame_model/assets/flame/flame2023.pkl`  # FLAME 2023 (versions w/ jaw rotation)
-- `flame_model/assets/flame/FLAME_masks.pkl`  # FLAME Vertex Masks
-
-> It is possible to run our method with FLAME 2020 by download to `flame_model/assets/flame/generic_model.pkl`. The `FLAME_MODEL_PATH` in `flame_model/flame.py` needs to be updated accordingly. And the FLAME tracking results should also be based on FLAME 2020 in this case.
-
 ## Running
 In the each shell, we curated all ablation studies. Last paragraph is our final version, SurFhead.
 ### Training
