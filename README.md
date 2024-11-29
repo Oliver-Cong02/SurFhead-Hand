@@ -1,3 +1,62 @@
+
+# Setup Steps by Xiaoyan
+
+### Step 1: Git clone this github repo [SurfHead(https://github.com/Oliver-Cong02/SurFhead-Hand/tree/main)]("https://github.com/Oliver-Cong02/SurFhead-Hand/tree/main") and follow [SurfHead]("https://github.com/SurFhead2025/SurFhead") and [GaussianAvatars]("https://github.com/ShenhanQian/GaussianAvatars") to setup the conda env.
+
+```shell
+git clone https://github.com/Oliver-Cong02/SurFhead-Hand.git --recursive
+cd SurFhead-Hand
+
+conda create --name surfhand -y python=3.10
+conda activate surfhand
+
+# Install CUDA and ninja for compilation
+conda install -c "nvidia/label/cuda-11.7.1" cuda-toolkit ninja  # use the right CUDA version
+
+# Install PyTorch (make sure that the CUDA version matches with "Step 1")
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu117
+# or
+conda install pytorch torchvision pytorch-cuda=11.7 -c pytorch -c nvidia
+# make sure torch.cuda.is_available() returns True
+
+# Install the rest packages (can take a while to compile diff-gaussian-rasterization, simple-knn, and nvdiffrast)
+pip install -r requirements.txt
+
+mkdir submodules 
+cd submodules
+git clone https://gitlab.inria.fr/bkerbl/simple-knn.git --recursive
+git clone https://github.com/coreqode/manopth --recursive
+
+cd simple-knn
+python -m setup install
+cd ..
+
+cd manopth
+python -m setup install
+cd ..
+
+# Install other missing packages simply by pip install xxx after running the code.
+pip install xxx
+```
+
+### Follow Chandradeep code [https://github.com/coreqode/manipulation/tree/main](https://github.com/coreqode/manipulation/tree/main) to run the video_seg.py to get .cache dir.
+
+### Post-process to get more accurate masks for hand and object. (To be written...)
+
+### Train
+
+
+```shell
+# please see the hyper-parameters in train.sh 
+sh train.sh 0
+```
+
+# -----------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
 # SurFhead: Affine Rig Blending for Geometrically Accurate 2D Gaussian Surfel Head Avatars
 
 
@@ -18,6 +77,9 @@ conda activate surfhead
 
 # Install CUDA and ninja for compilation
 conda install -c "nvidia/label/cuda-11.7.1" cuda-toolkit ninja  # use the right CUDA version
+
+# Install the rest packages (can take a while to compile diff-gaussian-rasterization, simple-knn, and nvdiffrast)
+pip install -r requirements.txt
 ```
 
 #### Step 2: Setup paths (for Linux)

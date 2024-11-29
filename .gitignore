@@ -2,7 +2,11 @@
 submodules/simple-knn
 submodules/diff-gaussian-rasterization
 submodules/manopth
-.cache/
+.cache/books1_grasp1
+.cache/weights
+.cache/*.jpg
+.cache/*.png
+.cache/*.npy
 output_final_original/
 output_final/
 ICLR2025_assets/

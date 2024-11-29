@@ -119,7 +119,7 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         # 3D Gaussians
-        self.iterations = 120_000  # 120000 #  30_000 (original)
+        self.iterations = 60_000  # 120000 #  30_000 (original)
         self.mask_iterations = 0
         self.position_lr_init = 0.016  # (scaled up according to mean triangle scale)  #0.00016 (original)#! *1/0.032
         self.position_lr_final = 0.00016  # (scaled up according to mean triangle scale) # 0.0000016 (original)

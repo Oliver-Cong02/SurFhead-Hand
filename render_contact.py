@@ -38,7 +38,6 @@ from utils.brics_utils.vis_util import plot_points_in_image, project, get_colors
 from utils.brics_utils.extra import *
 from utils.brics_utils.cam_utils import get_opengl_camera_attributes
 from scene.cameras import Camera
-from scene import SpecularModel
 from copy import deepcopy
 #! import F
 import torch.nn.functional as F
@@ -277,11 +276,12 @@ def render_set(dataset, name, iteration, gaussians, pipeline, background, render
     #     exit()
 
     start = 0
-    end = 53
+    end = 2
+
     timesteps = [i for i in range(start, end)]
     timesteps = sorted(timesteps)
     acc_dist = []
-    c_threshold = 0.0005 # 0.002
+    c_threshold = 0.002 # 0.002
 
     render_path = iter_path / f"renders_c_thresh_{c_threshold}_start_{start}_end_{end}"
     os.makedirs(render_path, exist_ok=True)
@@ -350,7 +350,7 @@ def render_set(dataset, name, iteration, gaussians, pipeline, background, render
     
     gaussians.hand_gaussian_model.apply_mano_param(m_dict)
     # breakpoint()
-    save_distribution_visualization(to_numpy(acc_dist), './vis/contact/data_distribution_visualization.jpg')
+    # save_distribution_visualization(to_numpy(acc_dist), './vis/contact/data_distribution_visualization.jpg')
     colors = get_colors_from_cmap(to_numpy(acc_dist), cmap_name='gray')[..., :3]
     colors = to_tensor(colors).cuda()
 
@@ -390,9 +390,6 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         specular = None
-        if pipeline.SGs:
-            specular = SpecularModel()
-            specular.load_weights(dataset.model_path)
 
         render_set(dataset, "contact", iteration, uni_gaussians, pipeline, background, render_mesh, extract_mesh, random_camera, specular)
 

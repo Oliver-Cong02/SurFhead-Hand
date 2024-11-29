@@ -9,7 +9,7 @@ fi
 # Extract the GPU ID from the command-line argument
 GPU_ID=$1
 
-port=60004 #! example port number
+port=60002 #! example port number
 
 # large mask: "/users/xcong2/data/users/xcong2/data/brics/book1/dialated_masks"
 # small mask "/users/xcong2/data/users/xcong2/projects/SurFhead/.cache/books1_grasp1/obj_dilated_hand_combine_mask"
@@ -19,10 +19,10 @@ port=60004 #! example port number
 # colored mesh : color2_grasp1
 OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
 -s "" \
--m output/1128_color2_grasp1_120k_300_620_640_obj_20k \
---port ${port} --eval --bind_to_mesh --lambda_normal 0.0 --lambda_dist 0.0 --depth_ratio 1 \
---interval 60000 \
---sample_obj_pts_num 20000 \
+-m output/1129_color2_grasp1_120k_300_620_640_obj_50k_normal001 \
+--port ${port} --eval --bind_to_mesh --lambda_normal 0.01 --lambda_dist 0.0 --depth_ratio 1 \
+--interval 30000 \
+--sample_obj_pts_num 50000 \
 --raw_video_dir "/users/xcong2/data/datasets/BRICS/BRICS-DATA-02/neural-hands/chandradeep/grasps/2023-10-27_session_color2_grasp1/synced" \
 --grasp_path "/users/xcong2/data/datasets/MANUS_data/chandradeep/grasps/color2_grasp1/meta_data.pkl" \
 --cam_path "/users/xcong2/data/datasets/MANUS_data/chandradeep/calib.object/optim_params.txt" \

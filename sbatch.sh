@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # job name
-#SBATCH -J 1128_color2_grasp1_120k_300_620_640_obj_20k
+#SBATCH -J 1129_color2_grasp1_120k_300_620_640_obj_50k_normal001
 
 #SBATCH --partition=ssrinath-gcondo --gres=gpu:1 --gres-flags=enforce-binding
 #SBATCH --account=ssrinath-gcondo
@@ -12,10 +12,10 @@
 #SBATCH --time=48:00:00
 
 # output
-#SBATCH -o sbatch_info/1128_color2_grasp1_120k_300_620_640_obj_20k.out
+#SBATCH -o sbatch_info/1129_color2_grasp1_120k_300_620_640_obj_50k_normal001.out
 
 # error
-#SBATCH -e sbatch_info/1128_color2_grasp1_120k_300_620_640_obj_20k.err
+#SBATCH -e sbatch_info/1129_color2_grasp1_120k_300_620_640_obj_50k_normal001.err
 
 # formatted=$(printf "%08d" $SLURM_ARRAY_TASK_ID)
 

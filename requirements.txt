@@ -10,6 +10,10 @@ plyfile
 tyro
 dearpygui
 roma
+taichi
+seaborn
+ipdb
+trimesh
 git+https://github.com/NVlabs/nvdiffrast
 git+https://github.com/facebookresearch/pytorch3d.git
 submodules/diff-surfel-jacobian-rasterization

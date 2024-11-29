@@ -159,8 +159,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # regularization
 
         if opt.iterations < 600000:
-            lambda_normal = opt.lambda_normal if iteration > 70000 else 0.0
-            lambda_dist = opt.lambda_dist if iteration > 30000 else 0.0
+            lambda_normal = opt.lambda_normal if iteration > (opt.iterations // 2) else 0.0
+            lambda_dist = opt.lambda_dist if iteration > (opt.iterations // 3) else 0.0
         else:
             lambda_normal = opt.lambda_normal if iteration > 140000 else 0.0
             lambda_dist = opt.lambda_dist if iteration > 60000 else 0.0
